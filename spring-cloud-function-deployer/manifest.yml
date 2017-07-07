@@ -1,0 +1,5 @@
+---
+name: faas-hackday-deployer
+memory: 1024M
+path: target/spring-cloud-function-deployer-1.0.0.BUILD-SNAPSHOT.jar
+health-check-type: none
