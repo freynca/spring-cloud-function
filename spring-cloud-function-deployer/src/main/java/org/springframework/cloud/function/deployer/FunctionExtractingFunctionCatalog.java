@@ -15,21 +15,34 @@
  */
 package org.springframework.cloud.function.deployer;
 
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.Map;
-import java.util.Set;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
+import com.google.common.io.Files;
+import org.apache.commons.io.IOUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 
+import org.apache.http.HttpHost;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
+import org.apache.http.conn.ssl.SSLContextBuilder;
+import org.apache.http.conn.ssl.TrustStrategy;
+import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.client.DefaultHttpClient;
+import org.apache.http.impl.client.HttpClients;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.boot.loader.thin.ArchiveUtils;
 import org.springframework.cloud.deployer.spi.app.AppDeployer;
@@ -42,6 +55,9 @@ import org.springframework.context.support.LiveBeansView;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.util.MethodInvoker;
+
+import javax.security.cert.CertificateException;
+import javax.security.cert.X509Certificate;
 
 public class FunctionExtractingFunctionCatalog
 		implements FunctionCatalog, FunctionInspector, DisposableBean {
@@ -143,7 +159,56 @@ public class FunctionExtractingFunctionCatalog
 		return (String) inspect(function, "getName");
 	}
 
-	public String deploy(String name, String path, String... args) {
+
+	private String downloadRemoteDependency(String path) throws Exception {
+		logger.info("downloadRemoteDependency invoked with path=["+path+"]");
+
+		File zipFileRecord = File.createTempFile("faas", "faas");
+		File destinationDir = Paths.get(System.getProperty("user.home") + "/.m2/repository/").toFile();
+
+		URI sourceUri = new URI(path);
+		if ("http".equals(sourceUri.getScheme()) || "https".equals(sourceUri.getScheme())){
+			logger.info("Downloading remote artifact from ["+path+"]");
+
+			SSLContextBuilder builder = new SSLContextBuilder();
+			builder.loadTrustMaterial(null, new TrustStrategy() {
+				@Override
+				public boolean isTrusted(java.security.cert.X509Certificate[] x509Certificates, String s) throws java.security.cert.CertificateException {
+					return true;
+				}
+
+			});
+
+			SSLConnectionSocketFactory sslSF = new SSLConnectionSocketFactory(builder.build(),
+					SSLConnectionSocketFactory.ALLOW_ALL_HOSTNAME_VERIFIER);
+
+			CloseableHttpClient closeableHttpClient = HttpClients.custom().setSSLSocketFactory(sslSF).build(); //new HttpGet(path);
+			HttpGet httpGet = new HttpGet(path);
+			HttpResponse downloadResponse = closeableHttpClient.execute(httpGet);
+
+			InputStream iStream = downloadResponse.getEntity().getContent();
+			FileOutputStream oStream = new FileOutputStream(zipFileRecord);
+			IOUtils.copy(iStream, oStream);
+		} else {
+			return path;
+		}
+
+		logger.info("Unzipping ["+zipFileRecord.getAbsolutePath()+"] to ["+destinationDir.getAbsolutePath()+"]");
+
+		Unzipper.unzip(zipFileRecord.getAbsolutePath(), destinationDir.getAbsolutePath());
+
+		return "maven://io.pivotal.faas.eip:hackday:0.0.1-SNAPSHOT";
+	}
+
+	public String deploy(String name, String pathArg, String... args) {
+
+		String path = pathArg;
+		try {
+			path = downloadRemoteDependency(pathArg);
+		}catch(Exception c){
+			throw new RuntimeException("Failed to download remote dependency", c);
+		}
+
 		Resource resource = new FileSystemResource(
 				ArchiveUtils.getArchiveRoot(ArchiveUtils.getArchive(path)));
 		AppDefinition definition = new AppDefinition(resource.getFilename(),
